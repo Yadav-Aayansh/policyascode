@@ -1,0 +1,95 @@
+{
+  "schemas": {
+    "rules": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string", "description": "2-8 word summary of body" },
+              "body": { "type": "string" },
+              "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+              "rationale": { "type": "string" },
+              "sources": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": { "quote": { "type": "string" } },
+                  "required": ["quote"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["title", "body", "priority", "rationale", "sources"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["rules"],
+      "additionalProperties": false
+    },
+    "edits": {
+      "type": "object",
+      "properties": {
+        "edits": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "edit": { "type": "string", "const": "delete" },
+                  "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                  "reason": { "type": "string" }
+                },
+                "required": ["edit", "ids", "reason"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "edit": { "type": "string", "const": "merge" },
+                  "ids": { "type": "array", "items": { "type": "string" }, "minItems": 2 },
+                  "title": { "type": "string", "description": "2-8 word summary of body" },
+                  "body": { "type": "string", "description": "Merge .body of merged items" },
+                  "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"]
+                  },
+                  "rationale": { "type": "string", "description": "Merge .rationale of merged items" },
+                  "reason": { "type": "string", "description": "Explain reason for merging" }
+                },
+                "required": ["edit", "ids", "title", "body", "priority", "rationale", "reason"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": ["edits"],
+      "additionalProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "validations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "result": { "type": "string", "enum": ["pass", "fail", "n/a", "unknown"] },
+              "reason": { "type": "string" }
+            },
+            "required": ["id", "result", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["validations"],
+      "additionalProperties": false
+    }
+  }
+}
