@@ -197,6 +197,9 @@ call_llm() {
     local text_content
     text_content=$(echo "$input_content" | jq -r '.text // .file_data // ""')
     
+    # Clean text content of problematic characters
+    text_content=$(echo "$text_content" | tr -d '\000-\037' | tr -d '\177-\377')
+    
     # Add schema description to the instructions
     local enhanced_instructions="$instructions
 
@@ -264,7 +267,18 @@ $(echo "$schema" | jq -c .)"
         return 1
     fi
     
-    echo "$content"
+    # Clean and validate JSON before returning
+    local cleaned_content
+    cleaned_content=$(echo "$content" | tr -d '\000-\037' | tr -d '\177-\377')
+    
+    # Validate JSON structure
+    if ! echo "$cleaned_content" | jq empty 2>/dev/null; then
+        log_error "Invalid JSON returned from API"
+        log_error "Content: $cleaned_content"
+        return 1
+    fi
+    
+    echo "$cleaned_content"
 }
 
 # Load JSON schemas
@@ -299,10 +313,11 @@ load_schemas() {
 # Extract command
 cmd_extract() {
     local output_file=""
-    local extraction_prompt="Extract atomic, testable rules from ONE policy document.
+    local extraction_prompt="Extract atomic, testable rules from this policy document.
 Keep each rule minimal.
 Write for an LLM to apply it unambiguously.
-Always include concise rationale and quotes."
+Always include concise rationale and quotes.
+Each rule should be specific to this document and its context."
     local input_files=()
     
     while [[ $# -gt 0 ]]; do
@@ -366,11 +381,12 @@ Always include concise rationale and quotes."
         
         # Parse response and add rule IDs and source file info
         local rules
-        rules=$(echo "$response" | jq --arg file "$(basename "$file")" --argjson start_index "$rule_index" '
+        rules=$(echo "$response" | jq --arg source_file "$(basename "$file")" --argjson start_index "$rule_index" '
             if .rules then
                 .rules | to_entries | map(
                     .value + {
-                        id: ("rule-" + (($start_index + .key) | tostring))
+                        id: ("rule-" + (($start_index + .key) | tostring)),
+                        source_file: $source_file
                     }
                 )
             else
@@ -479,7 +495,8 @@ cmd_consolidate() {
     local edits
     edits=$(echo "$response" | jq '.edits // []')
     
-    if [[ "$edits" == "null" || "$edits" == "[]" ]]; then
+    # Validate that edits is valid JSON array
+    if [[ "$edits" == "null" || "$edits" == "[]" ]] || ! echo "$edits" | jq -e 'type == "array"' >/dev/null 2>&1; then
         log_info "No consolidation edits suggested"
         cp "$input_file" "$output_file"
         return 0
@@ -487,27 +504,34 @@ cmd_consolidate() {
     
     # Apply edits to rules
     local consolidated_rules
-    consolidated_rules=$(echo "$rules" | jq --argjson edits "$edits" '
+    consolidated_rules=$(echo "$rules" | jq -c --argjson edits "$edits" '
         # Create lookup for rules by ID
-        (reduce .[] as $rule ({}; .[$rule.id] = $rule)) as $rule_lookup |
+        . as $all_rules |
+        (reduce $all_rules[] as $rule ({}; .[$rule.id] = $rule)) as $rule_lookup |
         
         # Collect IDs to delete
         ([$edits[] | select(.edit == "delete" or .edit == "merge") | .ids[]] | unique) as $to_delete |
         
         # Filter out deleted rules
-        [.[] | select(.id as $id | $to_delete | index($id) | not)] as $remaining |
+        [$all_rules[] | select(.id as $id | $to_delete | index($id) | not)] as $remaining |
         
         # Add merged rules
-        ($edits[] | select(.edit == "merge") | {
-            id: ("rule-merged-" + (now | tostring)),
+        ([$edits[] | select(.edit == "merge") | {
+            id: ("rule-merged-" + (.ids | join("-"))),
             title: .title,
             body: .body,
             priority: .priority,
             rationale: .rationale,
-            sources: [.ids[] | $rule_lookup[.].sources[]? // []] | flatten
-        }) as $merged_rules |
+            source_files: ([.ids[] | $rule_lookup[.].source_file // empty] | unique | select(length > 0)),
+            sources: ([.ids[] | ($rule_lookup[.].sources // [])[] // empty] | unique | select(length > 0))
+        } | if (.source_files | length) > 0 then 
+            . + {source_file: (.source_files | join(", "))} | del(.source_files)
+        else 
+            . + {source_file: "merged"} | del(.source_files)
+        end]) as $merged_rules |
         
-        $remaining + [$merged_rules]
+        # Combine remaining and merged rules
+        $remaining + $merged_rules
     ')
     
     # Save consolidated rules
@@ -525,14 +549,18 @@ cmd_consolidate() {
 cmd_validate() {
     local rules_file=""
     local output_file=""
-    local validation_prompt="Validate the provided document against each rule. For each rule, determine if the document passes, fails, is not applicable, or if it's unknown/unclear.
+    local validation_prompt="Validate the provided document against the given rules that originated from this same document.
+
+For each rule, determine if the document passes, fails, is not applicable, or if it's unknown/unclear.
 
 Return a validation result for each rule with:
 - id: the rule identifier
 - result: \"pass\" if the document complies, \"fail\" if it violates the rule, \"n/a\" if the rule is not applicable to this document, \"unknown\" if unclear or needs human review
 - reason: brief explanation of why it passes, fails, is not applicable, or is unknown
 
-Be specific and cite relevant parts of the document in your reasoning."
+Be specific and cite relevant parts of the document in your reasoning.
+
+Only validate rules that were originally extracted from this document or are applicable to it."
     local input_files=()
     
     while [[ $# -gt 0 ]]; do
@@ -597,6 +625,28 @@ Be specific and cite relevant parts of the document in your reasoning."
     for file in "${input_files[@]}"; do
         log_info "Validating file: $file"
         
+        local filename="$(basename "$file")"
+        
+        # Filter rules to only those from this source file or merged rules that include this file
+        local applicable_rules
+        applicable_rules=$(echo "$rules" | jq --arg filename "$filename" '
+            map(select(
+                .source_file == $filename or 
+                (.source_file | contains($filename)) or
+                (.source_files[]? // empty | . == $filename)
+            ))
+        ')
+        
+        local rule_count
+        rule_count=$(echo "$applicable_rules" | jq 'length')
+        
+        if [[ "$rule_count" -eq 0 ]]; then
+            log_warn "No applicable rules found for $file"
+            continue
+        fi
+        
+        log_info "Found $rule_count applicable rules for $file"
+        
         local content
         content=$(get_file_content "$file")
         if [[ $? -ne 0 ]]; then
@@ -606,7 +656,7 @@ Be specific and cite relevant parts of the document in your reasoning."
         local full_prompt="$validation_prompt
 
 Rules to validate against:
-$(echo "$rules" | jq -c .)"
+$(echo "$applicable_rules" | jq -c .)"
         
         local response
         response=$(call_llm "$full_prompt" "$content" "$VALIDATION_SCHEMA" "validation")
@@ -617,12 +667,14 @@ $(echo "$rules" | jq -c .)"
         
         # Parse response and add file name
         local validations
-        validations=$(echo "$response" | jq --arg file "$(basename "$file")" '
-            if .validations then
-                .validations | map(. + {file: $file})
-            else
-                []
-            end
+        validations=$(echo "$response" | jq -c --arg file "$filename" '
+            try (
+                if .validations then
+                    .validations | map(. + {file: $file})
+                else
+                    []
+                end
+            ) catch []
         ')
         
         if [[ "$validations" != "null" && "$validations" != "[]" ]]; then
@@ -632,7 +684,7 @@ $(echo "$rules" | jq -c .)"
             # Merge with existing validations
             all_validations=$(echo "$all_validations" | jq --argjson new_validations "$validations" '. + $new_validations')
             
-            log_success "Validated $validation_count rules against $file"
+            log_success "Validated $validation_count applicable rules against $file"
         else
             log_warn "No validations returned for $file"
         fi
@@ -646,8 +698,9 @@ $(echo "$rules" | jq -c .)"
         # Display results in a readable format
         echo "$all_validations" | jq -r '
             group_by(.file) | .[] | 
-            "\n=== " + .[0].file + " ===\n" +
-            (map("  " + .id + ": " + .result + " - " + .reason) | join("\n"))
+            "\n=== Validation Results for " + .[0].file + " ===\n" +
+            (map("  " + .id + ": " + .result + " - " + .reason) | join("\n")) +
+            "\n  Total: " + (length | tostring) + " rules validated"
         '
     fi
 }
