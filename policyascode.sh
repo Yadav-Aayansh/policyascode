@@ -1,10 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
-# Configuration
-CONFIG_FILE="config.json"
-DEFAULT_MODEL="claude-3-5-sonnet-20241022"
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Default configuration
+DEFAULT_MODEL="openai/gpt-4o-mini"
+DEFAULT_BASE_URL="https://openrouter.ai/api/v1"
+CONFIG_FILE="$HOME/.policyascode/config"
 
 # Colors for output
 RED='\033[0;31m'
@@ -15,95 +19,146 @@ NC='\033[0m' # No Color
 
 # Logging functions
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1" >&2
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1" >&2
+# Show usage information
+show_usage() {
+    cat << EOF
+Policy as Code CLI - Extract and consolidate atomic rules from policy documents
+
+USAGE:
+    policyascode <command> [options]
+
+COMMANDS:
+    extract      Extract atomic rules from policy documents
+    consolidate  Consolidate rules by removing duplicates and merging similar ones
+    validate     Validate documents against extracted rules
+    config       Configure API settings
+
+GLOBAL OPTIONS:
+    --model <model>        LLM model to use (default: $DEFAULT_MODEL)
+    --base-url <url>       API base URL (default: $DEFAULT_BASE_URL)
+    --api-key <key>        API key (can also use OPENAI_API_KEY env var)
+    --help, -h             Show this help message
+
+EXAMPLES:
+    # Configure API settings
+    policyascode config --api-key sk-... --base-url https://openrouter.ai/api/v1
+
+    # Extract rules from policy documents
+    policyascode extract --output rules.json policy1.md policy2.pdf
+
+    # Use custom extraction prompt
+    policyascode extract --extraction-prompt "Extract specific rules..." --output rules.json policy.md
+
+    # Consolidate existing rules
+    policyascode consolidate --input rules.json --output consolidated.json
+
+    # Validate documents against rules
+    policyascode validate --rules rules.json document1.md document2.pdf
+
+For more information on each command, use: policyascode <command> --help
+EOF
 }
 
-log_debug() {
-    if [[ "${DEBUG:-0}" == "1" ]]; then
-        echo -e "${BLUE}[DEBUG]${NC} $1" >&2
+# Show extract command usage
+show_extract_usage() {
+    cat << EOF
+Extract atomic rules from policy documents
+
+USAGE:
+    policyascode extract [options] <input-files...>
+
+OPTIONS:
+    --output, -o <file>           Output JSON file for extracted rules (required)
+    --extraction-prompt <text>    Custom extraction prompt
+    --model <model>              LLM model to use
+    --base-url <url>             API base URL
+    --api-key <key>              API key
+    --help, -h                   Show this help message
+
+EXAMPLES:
+    policyascode extract -o rules.json policy.md
+    policyascode extract --extraction-prompt "Extract compliance rules..." -o rules.json policy1.md policy2.pdf
+EOF
+}
+
+# Show consolidate command usage
+show_consolidate_usage() {
+    cat << EOF
+Consolidate rules by removing duplicates and merging similar ones
+
+USAGE:
+    policyascode consolidate [options]
+
+OPTIONS:
+    --input, -i <file>            Input JSON file with rules (required)
+    --output, -o <file>           Output JSON file for consolidated rules (required)
+    --consolidation-prompt <text> Custom consolidation prompt
+    --model <model>              LLM model to use
+    --base-url <url>             API base URL
+    --api-key <key>              API key
+    --help, -h                   Show this help message
+
+EXAMPLES:
+    policyascode consolidate -i rules.json -o consolidated.json
+    policyascode consolidate --consolidation-prompt "Merge similar rules..." -i rules.json -o consolidated.json
+EOF
+}
+
+# Show validate command usage
+show_validate_usage() {
+    cat << EOF
+Validate documents against extracted rules
+
+USAGE:
+    policyascode validate [options] <input-files...>
+
+OPTIONS:
+    --rules, -r <file>           JSON file with rules to validate against (required)
+    --output, -o <file>          Output JSON file for validation results
+    --validation-prompt <text>   Custom validation prompt
+    --model <model>             LLM model to use
+    --base-url <url>            API base URL
+    --api-key <key>             API key
+    --help, -h                  Show this help message
+
+EXAMPLES:
+    policyascode validate -r rules.json document.md
+    policyascode validate -r rules.json -o validation.json document1.md document2.pdf
+EOF
+}
+
+# Load configuration
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
     fi
 }
 
-# Get schema from config
-get_schema() {
-    local schema_name="$1"
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_error "Config file not found: $CONFIG_FILE"
-        return 1
-    fi
-    jq -r ".schemas.$schema_name" "$CONFIG_FILE"
-}
-
-# Generate unique rule ID
-generate_rule_id() {
-    echo "rule_$(date +%s)_$(openssl rand -hex 4)"
-}
-
-# Call Claude API
-call_claude() {
-    local system_prompt="$1"
-    local user_content="$2"
-    local model="${3:-$DEFAULT_MODEL}"
-    local schema="${4:-}"
-    
-    local messages='[{"role": "user", "content": '"$(jq -Rs . <<< "$user_content")"'}]'
-    
-    local request_body=$(jq -n \
-        --arg model "$model" \
-        --arg system "$system_prompt" \
-        --argjson messages "$messages" \
-        --argjson schema "$schema" \
-        '{
-            model: $model,
-            max_tokens: 8192,
-            system: $system,
-            messages: $messages
-        } + (if $schema != null and $schema != "" then {
-            tools: [{
-                type: "function",
-                function: {
-                    name: "provide_output",
-                    description: "Provide structured output",
-                    parameters: ($schema | fromjson)
-                }
-            }],
-            tool_choice: {
-                type: "function",
-                function: { name: "provide_output" }
-            }
-        } else {} end)')
-    
-    log_debug "Request body: $request_body"
-    
-    local response=$(curl -s https://api.anthropic.com/v1/messages \
-        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-        -H "content-type: application/json" \
-        -H "anthropic-version: 2023-06-01" \
-        -H "anthropic-beta: prompt-caching-2024-07-31,pdfs-2024-09-25,computer-use-2024-10-22" \
-        -d "$request_body")
-    
-    log_debug "Response: $response"
-    
-    # Check for errors
-    if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
-        log_error "API Error: $(echo "$response" | jq -r '.error.message')"
-        return 1
-    fi
-    
-    # Extract the function call result if using schema
-    if [[ -n "$schema" ]]; then
-        echo "$response" | jq -r '.content[0].input // .content[0].text // .content[0]'
-    else
-        echo "$response" | jq -r '.content[0].text'
-    fi
+# Save configuration
+save_config() {
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    cat > "$CONFIG_FILE" << EOF
+# Policy as Code CLI Configuration
+POLICYASCODE_API_KEY="$API_KEY"
+POLICYASCODE_BASE_URL="$BASE_URL"
+POLICYASCODE_MODEL="$MODEL"
+EOF
+    log_success "Configuration saved to $CONFIG_FILE"
 }
 
 # Get file content based on file type
@@ -118,7 +173,7 @@ get_file_content() {
     
     case "${file,,}" in
         *.pdf)
-            # For PDF files, we'll use base64 encoding
+            # For PDF files, we'll use base64 encoding (similar to the web version)
             local base64_data="data:application/pdf;base64,$(base64 -w 0 "$file")"
             jq -n --arg filename "$filename" --arg data "$base64_data" \
                 '{"type": "input_file", "filename": $filename, "file_data": $data}'
@@ -131,15 +186,123 @@ get_file_content() {
     esac
 }
 
+# Make API call to LLM
+call_llm() {
+    local instructions="$1"
+    local input_content="$2"
+    local schema="$3"
+    local schema_name="$4"
+    
+    # Extract text content from input_content
+    local text_content
+    text_content=$(echo "$input_content" | jq -r '.text // .file_data // ""')
+    
+    # Add schema description to the instructions
+    local enhanced_instructions="$instructions
+
+Please respond with valid JSON matching this schema:
+$(echo "$schema" | jq -c .)"
+    
+    local request_body
+    request_body=$(jq -n \
+        --arg model "$MODEL" \
+        --arg enhanced_instructions "$enhanced_instructions" \
+        --arg text_content "$text_content" \
+        '{
+            model: $model,
+            messages: [
+                {
+                    "role": "system",
+                    "content": $enhanced_instructions
+                },
+                {
+                    "role": "user", 
+                    "content": $text_content
+                }
+            ],
+            response_format: {
+                "type": "json_object"
+            },
+            stream: false
+        }')
+    
+    log_info "Making API call to $BASE_URL/chat/completions..."
+    log_info "Using model: $MODEL"
+    
+    local response
+    response=$(curl -s -X POST "$BASE_URL/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "HTTP-Referer: policyascode-cli" \
+        -H "X-Title: Policy as Code CLI" \
+        -d "$request_body")
+    
+    if [[ $? -ne 0 ]]; then
+        log_error "API call failed"
+        return 1
+    fi
+    
+    # Check for errors in response
+    local error
+    error=$(echo "$response" | jq -r '.error.message // empty')
+    if [[ -n "$error" ]]; then
+        log_error "API Error: $error"
+        local error_code
+        error_code=$(echo "$response" | jq -r '.error.code // empty')
+        if [[ -n "$error_code" ]]; then
+            log_error "Error code: $error_code"
+        fi
+        return 1
+    fi
+    
+    # Extract content from response
+    local content
+    content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+    
+    if [[ -z "$content" || "$content" == "null" ]]; then
+        log_error "No content returned from API"
+        return 1
+    fi
+    
+    echo "$content"
+}
+
+# Load JSON schemas
+load_schemas() {
+    local config_file="$SCRIPT_DIR/config.json"
+    if [[ ! -f "$config_file" ]]; then
+        log_error "Configuration file not found: $config_file"
+        log_error "Please ensure config.json exists in the same directory as this script"
+        return 1
+    fi
+    
+    RULES_SCHEMA=$(jq '.schemas.rules' "$config_file")
+    EDITS_SCHEMA=$(jq '.schemas.edits' "$config_file")
+    VALIDATION_SCHEMA=$(jq '.schemas.validation' "$config_file")
+    
+    if [[ "$RULES_SCHEMA" == "null" ]]; then
+        log_error "Rules schema not found in config file"
+        return 1
+    fi
+    
+    if [[ "$EDITS_SCHEMA" == "null" ]]; then
+        log_error "Edits schema not found in config file"
+        return 1
+    fi
+    
+    if [[ "$VALIDATION_SCHEMA" == "null" ]]; then
+        log_error "Validation schema not found in config file"
+        return 1
+    fi
+}
+
 # Extract command
 cmd_extract() {
     local output_file=""
     local extraction_prompt="Extract atomic, testable rules from ONE policy document.
 Keep each rule minimal.
 Write for an LLM to apply it unambiguously.
-Always include concise rationale and quotes.
-Generate unique IDs for each rule.
-Include the source filename in source_files array and in each quote's file field."
+Always include concise rationale and quotes."
     local input_files=()
     
     while [[ $# -gt 0 ]]; do
@@ -180,62 +343,73 @@ Include the source filename in source_files array and in each quote's file field
         return 1
     fi
     
-    local schema=$(get_schema "rules")
-    local all_rules='{"rules": []}'
+    load_schemas
+    
+    local all_rules="[]"
+    local rule_index=0
     
     for file in "${input_files[@]}"; do
-        log_info "Extracting rules from: $file"
-        local filename="$(basename "$file")"
-        local content=$(get_file_content "$file")
+        log_info "Processing file: $file"
         
+        local content
+        content=$(get_file_content "$file")
         if [[ $? -ne 0 ]]; then
-            log_error "Failed to read file: $file"
             continue
         fi
         
-        local user_content="Extract rules from this document. Each rule should have source_files: [\"$filename\"] and quotes should include file: \"$filename\".
-
-$content"
-        
-        local result=$(call_claude "$extraction_prompt" "$user_content" "$DEFAULT_MODEL" "$schema")
-        
+        local response
+        response=$(call_llm "$extraction_prompt" "$content" "$RULES_SCHEMA" "rules")
         if [[ $? -ne 0 ]]; then
-            log_error "Failed to extract rules from: $file"
+            log_error "Failed to process $file"
             continue
         fi
         
-        # Add unique IDs if not present and ensure source_files is set
-        local rules_with_ids=$(echo "$result" | jq --arg filename "$filename" '.rules |= map(
-            if .id == null or .id == "" then .id = ("rule_" + (now | tostring) + "_" + (. | tostring | @base64 | .[0:8])) else . end |
-            if .source_files == null or .source_files == [] then .source_files = [$filename] else . end |
-            if .sources then .sources |= map(if .file == null or .file == "" then .file = $filename else . end) else . end
-        )')
+        # Parse response and add rule IDs and source file info
+        local rules
+        rules=$(echo "$response" | jq --arg file "$(basename "$file")" --argjson start_index "$rule_index" '
+            if .rules then
+                .rules | to_entries | map(
+                    .value + {
+                        id: ("rule-" + (($start_index + .key) | tostring))
+                    }
+                )
+            else
+                []
+            end
+        ')
         
-        # Merge rules
-        all_rules=$(echo "$all_rules" "$rules_with_ids" | jq -s '.[0] * {rules: (.[0].rules + .[1].rules)}')
-        
-        log_info "Extracted $(echo "$rules_with_ids" | jq '.rules | length') rules from $file"
+        if [[ "$rules" != "null" && "$rules" != "[]" ]]; then
+            local rule_count
+            rule_count=$(echo "$rules" | jq 'length')
+            rule_index=$((rule_index + rule_count))
+            
+            # Merge with existing rules
+            all_rules=$(echo "$all_rules" | jq --argjson new_rules "$rules" '. + $new_rules')
+            
+            log_success "Extracted $rule_count rules from $file"
+        else
+            log_warn "No rules extracted from $file"
+        fi
     done
     
-    # Save to output file
-    echo "$all_rules" | jq '.' > "$output_file"
-    log_info "Saved $(echo "$all_rules" | jq '.rules | length') total rules to $output_file"
+    # Save results
+    echo "$all_rules" | jq '{rules: .}' > "$output_file"
+    
+    local total_rules
+    total_rules=$(echo "$all_rules" | jq 'length')
+    log_success "Extracted $total_rules total rules to $output_file"
 }
 
 # Consolidate command
 cmd_consolidate() {
-    local rules_file=""
+    local input_file=""
     local output_file=""
-    local consolidation_prompt="Review rules and identify opportunities to:
-1. Delete redundant rules
-2. Merge similar rules (combining their source_files arrays)
-Be conservative. Only suggest edits that clearly improve the ruleset.
-When merging, combine all source_files from the merged rules."
+    local consolidation_prompt="Suggest deletes and merges to remove duplicates and generalize rules where appropriate."
     
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --rules|-r)
-                rules_file="$2"
+            --input|-i)
+                input_file="$2"
                 shift 2
                 ;;
             --output|-o)
@@ -263,76 +437,101 @@ When merging, combine all source_files from the merged rules."
         esac
     done
     
-    if [[ -z "$rules_file" ]] || [[ -z "$output_file" ]]; then
-        log_error "Both rules file and output file are required"
+    if [[ -z "$input_file" ]]; then
+        log_error "Input file is required"
         show_consolidate_usage
         return 1
     fi
     
-    log_info "Consolidating rules from: $rules_file"
-    
-    local rules_content=$(cat "$rules_file")
-    local schema=$(get_schema "edits")
-    
-    local user_content="Review these rules and suggest edits (delete or merge only):
-
-$rules_content
-
-When merging rules, ensure the source_files array contains all unique source files from the rules being merged."
-    
-    local edits=$(call_claude "$consolidation_prompt" "$user_content" "$DEFAULT_MODEL" "$schema")
-    
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to get consolidation suggestions"
+    if [[ -z "$output_file" ]]; then
+        log_error "Output file is required"
+        show_consolidate_usage
         return 1
     fi
     
-    log_info "Applying edits..."
+    if [[ ! -f "$input_file" ]]; then
+        log_error "Input file not found: $input_file"
+        return 1
+    fi
+    
+    load_schemas
+    
+    log_info "Loading rules from $input_file"
+    local rules
+    rules=$(jq '.rules' "$input_file")
+    
+    if [[ "$rules" == "null" || "$rules" == "[]" ]]; then
+        log_error "No rules found in input file"
+        return 1
+    fi
+    
+    local rules_content
+    rules_content=$(jq -n --argjson rules "$rules" '{"type": "input_text", "text": ($rules | tostring)}')
+    
+    log_info "Consolidating rules..."
+    local response
+    response=$(call_llm "$consolidation_prompt" "$rules_content" "$EDITS_SCHEMA" "edits")
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to consolidate rules"
+        return 1
+    fi
+    
+    local edits
+    edits=$(echo "$response" | jq '.edits // []')
+    
+    if [[ "$edits" == "null" || "$edits" == "[]" ]]; then
+        log_info "No consolidation edits suggested"
+        cp "$input_file" "$output_file"
+        return 0
+    fi
     
     # Apply edits to rules
-    local updated_rules=$(echo "$rules_content" | jq --argjson edits "$edits" '
-        . as $original |
-        $edits.edits | reduce .[] as $edit ($original;
-            if $edit.edit == "delete" then
-                .rules |= map(select(.id as $id | $edit.ids | index($id) | not))
-            elif $edit.edit == "merge" then
-                # Get all rules being merged
-                (.rules | map(select(.id as $id | $edit.ids | index($id)))) as $merged_rules |
-                # Combine source_files from all merged rules
-                ($merged_rules | map(.source_files // []) | flatten | unique) as $combined_sources |
-                # Remove old rules
-                .rules |= map(select(.id as $id | $edit.ids | index($id) | not)) |
-                # Add merged rule with combined sources
-                .rules += [{
-                    id: ("merged_" + (now | tostring) + "_" + ($edit.ids | join("_") | .[0:20])),
-                    title: $edit.title,
-                    body: $edit.body,
-                    priority: $edit.priority,
-                    rationale: $edit.rationale,
-                    source_files: ($edit.source_files // $combined_sources),
-                    sources: ($merged_rules | map(.sources // []) | flatten)
-                }]
-            else
-                .
-            end
-        )
+    local consolidated_rules
+    consolidated_rules=$(echo "$rules" | jq --argjson edits "$edits" '
+        # Create lookup for rules by ID
+        (reduce .[] as $rule ({}; .[$rule.id] = $rule)) as $rule_lookup |
+        
+        # Collect IDs to delete
+        ([$edits[] | select(.edit == "delete" or .edit == "merge") | .ids[]] | unique) as $to_delete |
+        
+        # Filter out deleted rules
+        [.[] | select(.id as $id | $to_delete | index($id) | not)] as $remaining |
+        
+        # Add merged rules
+        ($edits[] | select(.edit == "merge") | {
+            id: ("rule-merged-" + (now | tostring)),
+            title: .title,
+            body: .body,
+            priority: .priority,
+            rationale: .rationale,
+            sources: [.ids[] | $rule_lookup[.].sources[]? // []] | flatten
+        }) as $merged_rules |
+        
+        $remaining + [$merged_rules]
     ')
     
-    echo "$updated_rules" | jq '.' > "$output_file"
+    # Save consolidated rules
+    echo "$consolidated_rules" | jq '{rules: .}' > "$output_file"
     
-    local original_count=$(echo "$rules_content" | jq '.rules | length')
-    local new_count=$(echo "$updated_rules" | jq '.rules | length')
+    local edit_count
+    edit_count=$(echo "$edits" | jq 'length')
+    local final_count
+    final_count=$(echo "$consolidated_rules" | jq 'length')
     
-    log_info "Consolidation complete: $original_count rules → $new_count rules"
-    log_info "Saved to: $output_file"
+    log_success "Applied $edit_count consolidation edits, resulting in $final_count rules saved to $output_file"
 }
 
 # Validate command
 cmd_validate() {
     local rules_file=""
     local output_file=""
-    local validation_prompt="Check if the document complies with each rule that was extracted from this specific document.
-Only validate rules that have this document in their source_files array.
+    local validation_prompt="Validate the provided document against each rule. For each rule, determine if the document passes, fails, is not applicable, or if it's unknown/unclear.
+
+Return a validation result for each rule with:
+- id: the rule identifier
+- result: \"pass\" if the document complies, \"fail\" if it violates the rule, \"n/a\" if the rule is not applicable to this document, \"unknown\" if unclear or needs human review
+- reason: brief explanation of why it passes, fails, is not applicable, or is unknown
+
 Be specific and cite relevant parts of the document in your reasoning."
     local input_files=()
     
@@ -378,216 +577,230 @@ Be specific and cite relevant parts of the document in your reasoning."
         return 1
     fi
     
-    local rules=$(cat "$rules_file")
-    local schema=$(get_schema "validation")
-    local all_validations='{"validations": []}'
+    if [[ ! -f "$rules_file" ]]; then
+        log_error "Rules file not found: $rules_file"
+        return 1
+    fi
+    
+    load_schemas
+    
+    local rules
+    rules=$(jq '.rules' "$rules_file")
+    
+    if [[ "$rules" == "null" || "$rules" == "[]" ]]; then
+        log_error "No rules found in rules file"
+        return 1
+    fi
+    
+    local all_validations="[]"
     
     for file in "${input_files[@]}"; do
-        log_info "Validating: $file"
-        local filename="$(basename "$file")"
-        local content=$(get_file_content "$file")
+        log_info "Validating file: $file"
         
+        local content
+        content=$(get_file_content "$file")
         if [[ $? -ne 0 ]]; then
-            log_error "Failed to read file: $file"
             continue
         fi
         
-        # Filter rules to only those from this source file
-        local relevant_rules=$(echo "$rules" | jq --arg filename "$filename" '
-            .rules |= map(select(.source_files | index($filename)))
-        ')
-        
-        local rule_count=$(echo "$relevant_rules" | jq '.rules | length')
-        
-        if [[ "$rule_count" -eq 0 ]]; then
-            log_warning "No rules found for file: $filename"
-            continue
-        fi
-        
-        log_info "Checking $rule_count rules relevant to $filename"
-        
-        local user_content="Validate this document against the following rules (only those from this source):
+        local full_prompt="$validation_prompt
 
-RULES (from $filename):
-$relevant_rules
-
-DOCUMENT TO VALIDATE:
-$content
-
-For each rule, set file: \"$filename\" in the validation result."
+Rules to validate against:
+$(echo "$rules" | jq -c .)"
         
-        local result=$(call_claude "$validation_prompt" "$user_content" "$DEFAULT_MODEL" "$schema")
-        
+        local response
+        response=$(call_llm "$full_prompt" "$content" "$VALIDATION_SCHEMA" "validation")
         if [[ $? -ne 0 ]]; then
-            log_error "Failed to validate: $file"
+            log_error "Failed to validate $file"
             continue
         fi
         
-        # Ensure file field is set in validations
-        local validations_with_file=$(echo "$result" | jq --arg filename "$filename" '
-            .validations |= map(if .file == null or .file == "" then .file = $filename else . end)
+        # Parse response and add file name
+        local validations
+        validations=$(echo "$response" | jq --arg file "$(basename "$file")" '
+            if .validations then
+                .validations | map(. + {file: $file})
+            else
+                []
+            end
         ')
         
-        # Merge validations
-        all_validations=$(echo "$all_validations" "$validations_with_file" | jq -s '
-            .[0] * {validations: (.[0].validations + .[1].validations)}
-        ')
-        
-        local compliant=$(echo "$validations_with_file" | jq '[.validations[] | select(.compliance == "compliant")] | length')
-        local non_compliant=$(echo "$validations_with_file" | jq '[.validations[] | select(.compliance == "non-compliant")] | length')
-        
-        log_info "Results for $filename: ✓ $compliant compliant, ✗ $non_compliant non-compliant"
+        if [[ "$validations" != "null" && "$validations" != "[]" ]]; then
+            local validation_count
+            validation_count=$(echo "$validations" | jq 'length')
+            
+            # Merge with existing validations
+            all_validations=$(echo "$all_validations" | jq --argjson new_validations "$validations" '. + $new_validations')
+            
+            log_success "Validated $validation_count rules against $file"
+        else
+            log_warn "No validations returned for $file"
+        fi
     done
     
-    # Save results
+    # Save or display results
     if [[ -n "$output_file" ]]; then
-        echo "$all_validations" | jq '.' > "$output_file"
-        log_info "Validation results saved to: $output_file"
+        echo "$all_validations" | jq '{validations: .}' > "$output_file"
+        log_success "Validation results saved to $output_file"
     else
-        echo "$all_validations" | jq '.'
+        # Display results in a readable format
+        echo "$all_validations" | jq -r '
+            group_by(.file) | .[] | 
+            "\n=== " + .[0].file + " ===\n" +
+            (map("  " + .id + ": " + .result + " - " + .reason) | join("\n"))
+        '
     fi
-    
-    # Summary
-    local total_compliant=$(echo "$all_validations" | jq '[.validations[] | select(.compliance == "compliant")] | length')
-    local total_non_compliant=$(echo "$all_validations" | jq '[.validations[] | select(.compliance == "non-compliant")] | length')
-    local total_partial=$(echo "$all_validations" | jq '[.validations[] | select(.compliance == "partially-compliant")] | length')
-    
-    log_info "Overall Summary: ✓ $total_compliant compliant, ✗ $total_non_compliant non-compliant, ⚠ $total_partial partially-compliant"
 }
 
-# Usage information
-show_usage() {
-    cat << EOF
-Usage: $0 <command> [options]
-
-Commands:
-    extract       Extract rules from policy documents
-    consolidate   Consolidate and deduplicate rules
-    validate      Validate documents against rules
-
-Global Options:
-    --help, -h    Show this help message
-
-Environment Variables:
-    ANTHROPIC_API_KEY    Required: Your Anthropic API key
-    DEBUG               Set to 1 for debug output
-
-Examples:
-    # Extract rules from multiple documents
-    $0 extract policy1.pdf policy2.md -o rules.json
+# Config command
+cmd_config() {
+    local show_config=false
     
-    # Consolidate rules
-    $0 consolidate -r rules.json -o consolidated_rules.json
-    
-    # Validate documents against rules
-    $0 validate -r consolidated_rules.json document.pdf -o validation_results.json
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --api-key)
+                API_KEY="$2"
+                shift 2
+                ;;
+            --base-url)
+                BASE_URL="$2"
+                shift 2
+                ;;
+            --model)
+                MODEL="$2"
+                shift 2
+                ;;
+            --show)
+                show_config=true
+                shift
+                ;;
+            --help|-h)
+                cat << EOF
+Configure API settings
 
+USAGE:
+    policyascode config [options]
+
+OPTIONS:
+    --api-key <key>      Set API key
+    --base-url <url>     Set API base URL
+    --model <model>      Set default model
+    --show               Show current configuration
+    --help, -h           Show this help message
+
+EXAMPLES:
+    policyascode config --api-key sk-... --base-url https://openrouter.ai/api/v1
+    policyascode config --show
 EOF
-}
-
-show_extract_usage() {
-    cat << EOF
-Usage: $0 extract [options] <input_files...>
-
-Extract atomic rules from policy documents.
-
-Options:
-    --output, -o <file>           Output JSON file for rules (required)
-    --extraction-prompt <prompt>  Custom extraction prompt
-    --help, -h                    Show this help message
-
-Examples:
-    $0 extract policy.pdf -o rules.json
-    $0 extract doc1.md doc2.pdf -o combined_rules.json
-
-EOF
-}
-
-show_consolidate_usage() {
-    cat << EOF
-Usage: $0 consolidate [options]
-
-Consolidate and deduplicate extracted rules.
-
-Options:
-    --rules, -r <file>            Input rules JSON file (required)
-    --output, -o <file>           Output JSON file for consolidated rules (required)
-    --consolidation-prompt <prompt> Custom consolidation prompt
-    --help, -h                    Show this help message
-
-Examples:
-    $0 consolidate -r rules.json -o consolidated.json
-
-EOF
-}
-
-show_validate_usage() {
-    cat << EOF
-Usage: $0 validate [options] <input_files...>
-
-Validate documents against extracted rules.
-
-Options:
-    --rules, -r <file>            Rules JSON file (required)
-    --output, -o <file>           Output JSON file for validation results
-    --validation-prompt <prompt>  Custom validation prompt
-    --help, -h                    Show this help message
-
-Examples:
-    $0 validate -r rules.json document.pdf -o results.json
-    $0 validate -r rules.json doc1.md doc2.pdf
-
-EOF
-}
-
-# Main command dispatcher
-main() {
-    # Check for API key
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-        log_error "ANTHROPIC_API_KEY environment variable is not set"
-        echo "Please set your Anthropic API key:"
-        echo "  export ANTHROPIC_API_KEY='your-api-key-here'"
-        exit 1
-    fi
-    
-    # Check for required tools
-    for cmd in jq curl; do
-        if ! command -v $cmd &> /dev/null; then
-            log_error "$cmd is required but not installed"
-            exit 1
-        fi
+                return 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                return 1
+                ;;
+            *)
+                log_error "Unexpected argument: $1"
+                return 1
+                ;;
+        esac
     done
     
-    # Parse command
-    if [[ $# -eq 0 ]]; then
-        show_usage
-        exit 0
+    if [[ "$show_config" == true ]]; then
+        echo "Current configuration:"
+        echo "  API Key: ${API_KEY:0:10}..." 
+        echo "  Base URL: $BASE_URL"
+        echo "  Model: $MODEL"
+        echo "  Config file: $CONFIG_FILE"
+        return 0
     fi
     
-    case "$1" in
+    save_config
+}
+
+# Main function
+main() {
+    # Load configuration
+    load_config
+    
+    # Set defaults
+    MODEL="${POLICYASCODE_MODEL:-$DEFAULT_MODEL}"
+    BASE_URL="${POLICYASCODE_BASE_URL:-$DEFAULT_BASE_URL}"
+    API_KEY="${POLICYASCODE_API_KEY:-${OPENAI_API_KEY:-}}"
+    
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --model)
+                MODEL="$2"
+                shift 2
+                ;;
+            --base-url)
+                BASE_URL="$2"
+                shift 2
+                ;;
+            --api-key)
+                API_KEY="$2"
+                shift 2
+                ;;
+            --help|-h)
+                show_usage
+                return 0
+                ;;
+            extract|consolidate|validate|config)
+                local command="$1"
+                shift
+                break
+                ;;
+            -*)
+                log_error "Unknown global option: $1"
+                show_usage
+                return 1
+                ;;
+            *)
+                log_error "Unknown command: $1"
+                show_usage
+                return 1
+                ;;
+        esac
+    done
+    
+    if [[ -z "${command:-}" ]]; then
+        log_error "No command specified"
+        show_usage
+        return 1
+    fi
+    
+    # Check API key for commands that need it
+    if [[ "$command" != "config" && -z "$API_KEY" ]]; then
+        log_error "API key is required. Set it using:"
+        log_error "  policyascode config --api-key <your-key>"
+        log_error "  or set OPENAI_API_KEY environment variable"
+        return 1
+    fi
+    
+    # Execute command
+    case $command in
         extract)
-            shift
             cmd_extract "$@"
             ;;
         consolidate)
-            shift
             cmd_consolidate "$@"
             ;;
         validate)
-            shift
             cmd_validate "$@"
             ;;
-        --help|-h|help)
-            show_usage
-            exit 0
+        config)
+            cmd_config "$@"
             ;;
         *)
-            log_error "Unknown command: $1"
+            log_error "Unknown command: $command"
             show_usage
-            exit 1
+            return 1
             ;;
     esac
 }
 
-# Run main function
-main "$@"
+# Run main function if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
