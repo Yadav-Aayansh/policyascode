@@ -1,98 +1,48 @@
-# Policy as Code CLI
+# Policy As Code
 
-Extract, consolidate, and validate atomic rules from policy documents using LLMs.
+AI-powered rule extraction, consolidation, and validation toolkit using LLMs.
 
-## Installation
+## Scripts
 
-```bash
-# Make executable
-chmod +x policyascode.sh
-
-# Optional: Add to PATH
-sudo ln -s $(pwd)/policyascode.sh /usr/local/bin/policyascode
-```
-
-## Quick Start
+### extract.sh
+Extracts structured rules from files using LLM analysis.
 
 ```bash
-# Configure API
-policyascode config --api-key sk-... --base-url https://openrouter.ai/api/v1
-
-# Extract rules from documents
-policyascode extract -o rules.json policy.md contract.pdf
-
-# Consolidate duplicates
-policyascode consolidate -i rules.json -o consolidated.json
-
-# Validate compliance
-policyascode validate -r consolidated.json document.md
+./extract.sh -m MODEL -s "PROMPT" file1.txt file2.txt
 ```
 
-## Commands
+**Output**: JSON rules with title, body, priority, rationale, and quotes.
 
-| Command | Purpose | Example |
-|---------|---------|---------|
-| `extract` | Extract atomic rules from documents | `policyascode extract -o rules.json policy.md` |
-| `consolidate` | Remove duplicates and merge similar rules | `policyascode consolidate -i rules.json -o clean.json` |
-| `validate` | Check document compliance against rules | `policyascode validate -r rules.json doc.md` |
-| `config` | Set API credentials and preferences | `policyascode config --api-key sk-...` |
+### consolidate.sh
+Merges duplicate/overlapping rules to eliminate redundancy.
 
-## Configuration
-
-Set via environment variables or config command:
-- `OPENAI_API_KEY` - API key
-- `POLICYASCODE_BASE_URL` - API endpoint (default: OpenRouter)
-- `POLICYASCODE_MODEL` - LLM model (default: gpt-4o-mini)
-
-Config stored in `~/.policyascode/config`
-
-## Supported Formats
-
-- **Input**: Markdown (`.md`), Text (`.txt`), PDF (`.pdf`)
-- **Output**: JSON with structured rule data
-
-## Rule Structure
-
-```json
-{
-  "id": "rule-1",
-  "title": "Brief rule summary",
-  "body": "Detailed rule description",
-  "priority": "high|medium|low",
-  "rationale": "Why this rule exists",
-  "source_file": "policy.md",
-  "sources": [{"quote": "Original text"}]
-}
-```
-
-## Examples
-
-### Extract from multiple sources
 ```bash
-policyascode extract -o all-rules.json \
-  security-policy.md \
-  compliance-doc.pdf \
-  guidelines.txt
+./consolidate.sh -m MODEL -s "PROMPT" -i input_rules.json -o output_rules.json
 ```
 
-### Custom prompts
+**Actions**: Delete redundant rules, merge similar ones.
+
+### validate.sh
+Validates files against established rules.
+
 ```bash
-policyascode extract \
-  --extraction-prompt "Focus on security requirements only" \
-  -o security-rules.json policy.md
+./validate.sh -m MODEL -s "PROMPT" -r rules.json file1.txt file2.txt
 ```
 
-### Validation with output
-```bash
-policyascode validate \
-  -r rules.json \
-  -o validation-report.json \
-  implementation.md
-```
+**Output**: Pass/fail status with reasons (✅❌⚪❓).
+
+## Workflow
+
+1. **Extract** rules from source files
+2. **Consolidate** to remove duplicates
+3. **Validate** target files against rules
 
 ## Requirements
 
-- Bash 4.0+
+- `llm` CLI tool
 - `jq` for JSON processing
-- `curl` for API calls
-- `base64` for PDF handling
+- LLM model access
+
+## Schema
+
+Rules contain: title, body, priority (low/medium/high), rationale, supporting quotes.
